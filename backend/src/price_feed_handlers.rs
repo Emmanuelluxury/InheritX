@@ -7,6 +7,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use std::str::FromStr;
 use std::sync::Arc;
 use tracing;
 use uuid::Uuid;
@@ -67,7 +68,7 @@ pub struct PlanValuationResponse {
 
 /// Get current price for an asset
 pub async fn get_price(
-    State((db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
+    State((_db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
     Path(asset_code): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let asset_price = price_service.get_price(&asset_code).await?;
@@ -85,7 +86,7 @@ pub async fn get_price(
 
 /// Get price history for an asset
 pub async fn get_price_history(
-    State((db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
+    State((_db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
     Path(asset_code): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let history = price_service.get_price_history(&asset_code, 100).await?;
@@ -110,7 +111,7 @@ pub async fn get_price_history(
 
 /// Register a new price feed (admin only)
 pub async fn register_price_feed(
-    State((db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
+    State((_db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
     AuthenticatedAdmin(_admin): AuthenticatedAdmin,
     Json(req): Json<RegisterFeedRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -144,7 +145,7 @@ pub async fn register_price_feed(
 
 /// Update price for an asset (admin only)
 pub async fn update_price(
-    State((db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
+    State((_db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
     AuthenticatedAdmin(_admin): AuthenticatedAdmin,
     Path(asset_code): Path<String>,
     Json(req): Json<UpdatePriceRequest>,
@@ -171,12 +172,12 @@ pub async fn update_price(
 
 /// Calculate collateral valuation for an amount
 pub async fn calculate_valuation(
-    State((db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
+    State((_db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
     Path((asset_code, amount_str)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let amount: Decimal = amount_str.parse().map_err(|_| {
-        ApiError::BadRequest("Invalid amount format".to_string())
-    })?;
+    let amount: Decimal = amount_str
+        .parse()
+        .map_err(|_| ApiError::BadRequest("Invalid amount format".to_string()))?;
 
     if amount <= Decimal::ZERO {
         return Err(ApiError::BadRequest(
@@ -207,24 +208,27 @@ pub async fn get_plan_valuation(
     Path(plan_id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
     // Fetch plan from database
-    let plan = sqlx::query_as::<_, (String, String, rust_decimal::Decimal)>(
+    let plan = sqlx::query_as::<_, (String, String)>(
         r#"
-        SELECT asset_code, COALESCE(asset_code, 'USDC'), net_amount
+        SELECT asset_code, net_amount::text
         FROM plans
         WHERE id = $1
-        "#
+        "#,
     )
     .bind(plan_id)
     .fetch_optional(&db)
     .await
     .map_err(|e| {
         tracing::error!("Failed to fetch plan: {}", e);
-        ApiError::InternalServerError("Database error".to_string())
+        ApiError::Internal(anyhow::anyhow!("Database error"))
     })?
     .ok_or_else(|| ApiError::NotFound(format!("Plan {} not found", plan_id)))?;
 
-    let asset_code = plan.1;
-    let amount = plan.2;
+    let asset_code = plan.0;
+    let amount = Decimal::from_str(&plan.1).map_err(|e| {
+        tracing::error!("Failed to parse amount: {}", e);
+        ApiError::Internal(anyhow::anyhow!("Invalid amount format"))
+    })?;
 
     let mut valuation = price_service
         .calculate_valuation(&asset_code, amount)
@@ -248,7 +252,7 @@ pub async fn get_plan_valuation(
 
 /// Get all active price feeds (admin only)
 pub async fn get_active_feeds(
-    State((db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
+    State((_db, price_service)): State<(PgPool, Arc<dyn PriceFeedService>)>,
     AuthenticatedAdmin(_admin): AuthenticatedAdmin,
 ) -> Result<Json<Value>, ApiError> {
     let feeds = price_service.get_active_feeds().await?;
